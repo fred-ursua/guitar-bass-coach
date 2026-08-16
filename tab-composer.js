@@ -45,7 +45,11 @@
 
   function mount({ element, textarea, instrument, sequence, bpm, onChange }) {
     const tuning = tunings[instrument] || tunings.guitar;
-    let steps = Math.max(16, ...(Array.isArray(sequence) ? sequence.map(note => (+note.step || 0) + (+note.duration || 1)) : [16]));
+    const asciiSteps = Math.max(0, ...String(textarea.value || '').split(/\r?\n/).filter(line => line.includes('|')).map(line => {
+      const body = line.slice(line.indexOf('|') + 1).replace(/\|.*$/, '');
+      return Math.floor(body.length / 3);
+    }));
+    let steps = Math.max(16, asciiSteps, ...(Array.isArray(sequence) ? sequence.map(note => (+note.step || 0) + (+note.duration || 1)) : [16]));
     steps = Math.ceil(steps / 4) * 4;
     let notes = Array.isArray(sequence) && sequence.length
       ? sequence.map(note => ({
@@ -60,6 +64,8 @@
     let playbackTimers = [];
     let playing = false;
     let drag = null;
+    const measureSteps = 8;
+    let currentMeasure = 0;
 
     element.className = 'tab-composer';
     element.innerHTML = `
@@ -70,20 +76,38 @@
           <button class="btn secondary" data-composer-stop disabled>Stop</button>
         </div>
       </div>
-      <div class="composer-toolbar">
-        <label>Fret <input data-composer-fret type="number" min="0" max="36" value="5"></label>
-        <button class="btn secondary" data-composer-add>Add 4 beats</button>
-        <button class="btn secondary" data-composer-delete disabled>Delete note</button>
-        <button class="btn secondary" data-composer-clear>Clear</button>
+      <div class="composer-measure-nav">
+        <button class="btn secondary" data-composer-previous aria-label="Previous measure">←</button>
+        <strong data-composer-measure>Measure 1</strong>
+        <button class="btn secondary" data-composer-next aria-label="Next measure">→</button>
+        <button class="btn secondary" data-composer-add>Add measure</button>
       </div>
-      <div class="composer-scroll"><div class="composer-grid" data-composer-grid></div></div>
-      <p class="composer-help">Click an empty beat to add a note. Drag a note to move it; drag its right handle to change its length. Double-click to delete. Each column is one rhythm division.</p>`;
+      <div class="composer-grid" data-composer-grid></div>
+      <div class="composer-note-editor" data-composer-editor hidden>
+        <div class="composer-selected">
+          <span data-composer-selected>Choose a note</span>
+          <div class="composer-fret-stepper">
+            <button class="btn secondary" data-fret-down aria-label="Lower fret">−</button>
+            <label>Fret <input data-composer-fret type="number" min="0" max="36" value="5"></label>
+            <button class="btn secondary" data-fret-up aria-label="Raise fret">+</button>
+          </div>
+        </div>
+        <div class="composer-lengths" aria-label="Note length">
+          <span>Note length</span>
+          <div><button class="btn secondary" data-note-length="1">⅛</button><button class="btn secondary" data-note-length="2">¼</button><button class="btn secondary" data-note-length="4">½</button><button class="btn secondary" data-note-length="8">Whole</button></div>
+        </div>
+        <button class="btn danger" data-composer-delete>Delete note</button>
+      </div>
+      <div class="composer-footer"><p class="composer-help">Tap a beat to add a note. Tap a note to edit its fret and length below. You can still drag notes to move them.</p><button class="btn secondary" data-composer-clear>Clear all</button></div>`;
 
     const grid = element.querySelector('[data-composer-grid]');
     const fretInput = element.querySelector('[data-composer-fret]');
     const deleteButton = element.querySelector('[data-composer-delete]');
     const playButton = element.querySelector('[data-composer-play]');
     const stopButton = element.querySelector('[data-composer-stop]');
+    const editor = element.querySelector('[data-composer-editor]');
+    const selectedLabel = element.querySelector('[data-composer-selected]');
+    const measureLabel = element.querySelector('[data-composer-measure]');
 
     function emit() {
       notes.sort((a, b) => a.step - b.step || a.string - b.string);
@@ -93,16 +117,24 @@
     }
 
     function render() {
-      grid.style.setProperty('--composer-steps', steps);
-      grid.innerHTML = `<div class="composer-corner">String</div>${Array.from({ length: steps }, (_, step) => `<div class="composer-beat${step % 4 === 0 ? ' bar' : ''}">${step % 4 + 1}</div>`).join('')}`;
+      const measureCount = Math.ceil(steps / measureSteps);
+      currentMeasure = clamp(currentMeasure, 0, measureCount - 1);
+      const measureStart = currentMeasure * measureSteps, measureEnd = measureStart + measureSteps;
+      measureLabel.textContent = `Measure ${currentMeasure + 1} of ${measureCount}`;
+      element.querySelector('[data-composer-previous]').disabled = currentMeasure === 0;
+      element.querySelector('[data-composer-next]').disabled = currentMeasure === measureCount - 1;
+      grid.style.setProperty('--composer-steps', measureSteps);
+      grid.style.setProperty('--composer-strings', tuning.length);
+      grid.innerHTML = `<div class="composer-corner">String</div>${Array.from({ length: measureSteps }, (_, step) => `<div class="composer-beat${step % 4 === 0 ? ' bar' : ''}">${step + 1}</div>`).join('')}`;
       tuning.forEach((string, stringIndex) => {
         const label = document.createElement('div');
         label.className = 'composer-string-label';
         label.textContent = string.label;
         grid.append(label);
-        for (let step = 0; step < steps; step++) {
+        for (let localStep = 0; localStep < measureSteps; localStep++) {
+          const step = measureStart + localStep;
           const cell = document.createElement('button');
-          cell.className = `composer-cell${step % 4 === 0 ? ' bar' : ''}`;
+          cell.className = `composer-cell${localStep % 4 === 0 ? ' bar' : ''}`;
           cell.type = 'button';
           cell.dataset.string = stringIndex;
           cell.dataset.step = step;
@@ -110,26 +142,36 @@
           grid.append(cell);
         }
         notes.forEach((note, index) => {
-          if (note.string !== stringIndex) return;
+          const noteEnd = note.step + note.duration;
+          if (note.string !== stringIndex || note.step >= measureEnd || noteEnd <= measureStart) return;
+          const visibleStart = Math.max(note.step, measureStart), visibleEnd = Math.min(noteEnd, measureEnd);
           const chip = document.createElement('button');
           chip.className = `composer-note${index === selected ? ' selected' : ''}`;
           chip.type = 'button';
           chip.dataset.note = index;
-          chip.style.gridColumn = `${note.step + 2} / span ${note.duration}`;
+          chip.style.gridColumn = `${visibleStart - measureStart + 2} / span ${visibleEnd - visibleStart}`;
           chip.style.gridRow = `${stringIndex + 2}`;
           chip.innerHTML = `<span>${note.fret}</span><i data-resize aria-hidden="true"></i>`;
           chip.setAttribute('aria-label', `Fret ${note.fret}, ${string.label} string, beat ${note.step + 1}, length ${note.duration}`);
           grid.append(chip);
         });
       });
-      deleteButton.disabled = selected < 0;
+      updateEditor();
+    }
+
+    function updateEditor() {
+      const note = notes[selected];
+      editor.hidden = !note;
+      if (!note) return;
+      fretInput.value = note.fret;
+      selectedLabel.textContent = `${tuning[note.string].label} string · beat ${note.step + 1}`;
+      element.querySelectorAll('[data-note-length]').forEach(button => button.classList.toggle('active', +button.dataset.noteLength === note.duration));
     }
 
     function select(index) {
       selected = index;
-      if (notes[index]) fretInput.value = notes[index].fret;
       grid.querySelectorAll('[data-note]').forEach(chip => chip.classList.toggle('selected', +chip.dataset.note === index));
-      deleteButton.disabled = selected < 0;
+      updateEditor();
     }
 
     grid.addEventListener('click', event => {
@@ -175,12 +217,14 @@
       const deltaSteps = Math.round((event.clientX - drag.startX) / drag.cellWidth);
       if (drag.resize) notes[drag.index].duration = clamp(drag.note.duration + deltaSteps, 1, steps - notes[drag.index].step);
       else {
-        notes[drag.index].step = clamp(drag.note.step + deltaSteps, 0, steps - notes[drag.index].duration);
+        const measureStart = currentMeasure * measureSteps, measureEnd = measureStart + measureSteps;
+        notes[drag.index].step = clamp(drag.note.step + deltaSteps, measureStart, measureEnd - 1);
         notes[drag.index].string = clamp(drag.note.string + Math.round((event.clientY - drag.startY) / drag.rowHeight), 0, tuning.length - 1);
       }
       const chip = grid.querySelector(`[data-note="${drag.index}"]`);
       if (chip) {
-        chip.style.gridColumn = `${notes[drag.index].step + 2} / span ${notes[drag.index].duration}`;
+        const localStep = notes[drag.index].step - currentMeasure * measureSteps;
+        chip.style.gridColumn = `${localStep + 2} / span ${Math.min(notes[drag.index].duration, measureSteps - localStep)}`;
         chip.style.gridRow = `${notes[drag.index].string + 2}`;
       }
     });
@@ -193,7 +237,16 @@
       if (selected >= 0) { notes[selected].fret = +fretInput.value; emit(); render(); }
     });
     deleteButton.onclick = () => { if (selected >= 0) { notes.splice(selected, 1); selected = -1; emit(); render(); } };
-    element.querySelector('[data-composer-add]').onclick = () => { steps += 4; emit(); render(); };
+    element.querySelector('[data-fret-down]').onclick = () => { if (selected < 0) return; fretInput.value = Math.max(0, +fretInput.value - 1); fretInput.dispatchEvent(new Event('change')); };
+    element.querySelector('[data-fret-up]').onclick = () => { if (selected < 0) return; fretInput.value = Math.min(36, +fretInput.value + 1); fretInput.dispatchEvent(new Event('change')); };
+    element.querySelectorAll('[data-note-length]').forEach(button => button.onclick = () => {
+      if (selected < 0) return;
+      notes[selected].duration = clamp(+button.dataset.noteLength, 1, steps - notes[selected].step);
+      emit(); render();
+    });
+    element.querySelector('[data-composer-previous]').onclick = () => { currentMeasure--; selected = -1; render(); };
+    element.querySelector('[data-composer-next]').onclick = () => { currentMeasure++; selected = -1; render(); };
+    element.querySelector('[data-composer-add]').onclick = () => { steps += measureSteps; currentMeasure = Math.ceil(steps / measureSteps) - 1; selected = -1; emit(); render(); };
     element.querySelector('[data-composer-clear]').onclick = () => { if (!notes.length) return; notes = []; selected = -1; emit(); render(); };
 
     function pluck(midi, when, length) {
