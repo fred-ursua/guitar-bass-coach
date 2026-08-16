@@ -130,6 +130,8 @@
         const label = document.createElement('div');
         label.className = 'composer-string-label';
         label.textContent = string.label;
+        label.style.gridColumn = '1';
+        label.style.gridRow = `${stringIndex + 2}`;
         grid.append(label);
         for (let localStep = 0; localStep < measureSteps; localStep++) {
           const step = measureStart + localStep;
@@ -138,6 +140,8 @@
           cell.type = 'button';
           cell.dataset.string = stringIndex;
           cell.dataset.step = step;
+          cell.style.gridColumn = `${localStep + 2}`;
+          cell.style.gridRow = `${stringIndex + 2}`;
           cell.setAttribute('aria-label', `${string.label} string, beat ${step + 1}`);
           grid.append(cell);
         }
