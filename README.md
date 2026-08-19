@@ -1,6 +1,6 @@
-# Guitar & Bass Coach V5
+# Guitar & Bass Practice Lab
 
-An offline-capable guitar and bass practice app with exercises, Coach Mode, metronome, progress history, personal-best tracking, song slowdown, looping, and waveform selection.
+An offline-capable guitar and bass practice tool with a Tempo Builder, metronome, visual TAB composer, progress history, personal-best tracking, song slowdown, looping, and waveform selection.
 
 ## Use it locally
 
